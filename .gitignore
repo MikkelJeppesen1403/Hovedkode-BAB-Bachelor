@@ -1,0 +1,14 @@
+JPNall.csv
+JPN_market.csv
+*.rds
+*.csv
+*.png
+*.zip
+
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+.Renviron
+.env
