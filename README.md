@@ -1,35 +1,35 @@
-# Betting Against Beta Strategy — Japan
+# Betting Against Beta-strategi — Japan
 
-This repository contains the R code used to construct and analyze a Betting Against Beta (BAB) strategy for the Japanese equity market.
+Dette repository indeholder R-koden, der bruges til at konstruere og analysere en Betting Against Beta-strategi (BAB) for det japanske aktiemarked.
 
-The empirical approach is based on Frazzini and Pedersen (2014), *Betting Against Beta*, and applies the strategy to Japanese stock-level return data.
+Den empiriske tilgang er baseret på Frazzini og Pedersen (2014), *Betting Against Beta*, og anvendes på japanske aktiedata.
 
-## Project overview
+## Projektoversigt
 
-The script performs the following steps:
+Scriptet udfører følgende trin:
 
-1. Loads and cleans daily Japanese stock data and market return data.
-2. Constructs weekly stock and market excess returns.
-3. Estimates stock-level betas using rolling correlations and volatilities.
-4. Applies beta shrinkage and lagged beta estimates to avoid look-ahead bias.
-5. Constructs the BAB portfolio using low-beta and high-beta legs.
-6. Evaluates performance using excess returns, CAPM alpha, Newey-West t-statistics, Sharpe ratio, Sortino ratio, volatility, and maximum drawdown.
-7. Produces decile portfolio results similar to Frazzini and Pedersen’s empirical tables.
-8. Runs several robustness tests, including:
-   - alternative beta estimation windows,
-   - alternative shrinkage parameters,
-   - quintile and decile portfolio construction,
-   - equal-weighted and value-weighted portfolios,
-   - transaction cost analysis,
-   - leverage analysis,
-   - liquidity and large-cap universe tests,
-   - subperiod analysis.
+1. Indlæser og renser daglige japanske aktiedata og markedsafkast.
+2. Konstruerer ugentlige aktie- og markedsafkast i excess return-form.
+3. Estimerer aktiespecifikke betaer ved hjælp af rullende korrelationer og volatilitet.
+4. Anvender beta-shrinkage og laggede betaestimater for at undgå look-ahead bias.
+5. Konstruerer BAB-porteføljen med et lav-beta-ben og et høj-beta-ben.
+6. Evaluerer performance ved hjælp af excess returns, CAPM-alpha, Newey-West t-statistikker, Sharpe ratio, Sortino ratio, volatilitet og maximum drawdown.
+7. Producerer decilporteføljeresultater i stil med Frazzini og Pedersens empiriske tabeller.
+8. Udfører flere robusthedstests, herunder:
+   - alternative beta-estimeringsvinduer,
+   - alternative shrinkage-parametre,
+   - kvintil- og decilbaseret porteføljekonstruktion,
+   - equal-weighted og value-weighted porteføljer,
+   - analyse af handelsomkostninger,
+   - leverage-analyse,
+   - likviditets- og large-cap-univers tests,
+   - delperiodeanalyse.
 
 ## Data
 
-The data files are **not included** in this repository.
+Datafilerne er **ikke inkluderet** i dette repository.
 
-The script expects the following input files:
+Scriptet forventer følgende inputfiler:
 
 ```text
 JPNall.csv
