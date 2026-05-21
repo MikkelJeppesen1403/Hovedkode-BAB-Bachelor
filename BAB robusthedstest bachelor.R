@@ -2016,442 +2016,6 @@ cat("Gemt: robusthed_vaegtning_equal_value_sharpe.png\n")
 cat("\n=== STEP 5.4 FÆRDIG — robusthedstest for vægtning er gennemført ===\n")
 
 # ==============================================================================
-# STEP 5.5: ROBUSTHEDSTEST — VALUE-WEIGHTED MED EXPONENTIAL DECAY
-# ==============================================================================
-# Formål:
-#   Test om BAB-resultaterne er robuste over for en porteføljekonstruktion,
-#   hvor aktier vægtes efter markedsværdi, men hvor vægtene samtidig justeres
-#   for tidsafhængighed ved hjælp af en eksponentiel decay-funktion.
-#
-# Vægt:
-#   w_i ∝ ME_i * lambda^(T - t_i)
-#
-# hvor:
-#   ME_i  = aktiens markedsværdi
-#   T     = seneste dato i den pågældende uge
-#   t_i   = aktiens observationsdato
-#   lambda ∈ (0,1)
-#
-# Fortolkning:
-#   Når lambda < 1, får nyere observationer højere vægt end ældre observationer.
-#   Jo lavere lambda er, desto stærkere nedvægtes ældre observationer.
-# ==============================================================================
-
-cat("\n=== STEP 5.5: Robusthedstest — value-weighted med exponential decay ===\n")
-
-library(data.table)
-library(sandwich)
-library(lmtest)
-library(ggplot2)
-
-# ------------------------------------------------------------------------------
-# Hjælpefunktion: BAB med value-weighting og exponential decay
-# ------------------------------------------------------------------------------
-
-run_bab_decay_weight_test <- function(data_bab_input,
-                                      lambda = 0.95,
-                                      label = "Value-weighted decay",
-                                      min_stocks_leg = 5) {
-  
-  cat("\n------------------------------------------------------------\n")
-  cat("Robusthedstest:", label, "\n")
-  cat("Lambda:", lambda, "\n")
-  cat("------------------------------------------------------------\n")
-  
-  if (lambda <= 0 || lambda > 1) {
-    stop("lambda skal være i intervallet (0, 1].")
-  }
-  
-  dt <- copy(data_bab_input)
-  
-  required_cols <- c(
-    "id", "date", "iso_year", "iso_week",
-    "beta_lag", "ret_exc_wk", "mkt_exc_wk", "me"
-  )
-  
-  if (!all(required_cols %in% names(dt))) {
-    stop("data_bab_input mangler en eller flere nødvendige kolonner: ",
-         paste(setdiff(required_cols, names(dt)), collapse = ", "))
-  }
-  
-  dt <- dt[
-    !is.na(beta_lag) &
-      !is.na(ret_exc_wk) &
-      !is.na(mkt_exc_wk) &
-      !is.na(me) &
-      !is.na(date) &
-      me > 0 &
-      is.finite(beta_lag) &
-      is.finite(ret_exc_wk) &
-      is.finite(mkt_exc_wk) &
-      is.finite(me)
-  ]
-  
-  setorder(dt, iso_year, iso_week, beta_lag)
-  
-  # --------------------------------------------------------------------------
-  # 1) Median-split som i baseline
-  # --------------------------------------------------------------------------
-  
-  dt[, beta_med := median(beta_lag, na.rm = TRUE),
-     by = .(iso_year, iso_week)]
-  
-  dt[, portfolio := fifelse(beta_lag <= beta_med, "low", "high")]
-  
-  # --------------------------------------------------------------------------
-  # 2) Beregn decay-faktor
-  # --------------------------------------------------------------------------
-  # T er seneste observationsdato i den pågældende uge.
-  # age_days = T - t_i.
-  #
-  # Hvis alle aktier i en uge har samme dato, bliver decay-faktoren 1 for alle,
-  # og testen svarer i praksis til value-weighting.
-  # --------------------------------------------------------------------------
-  
-  dt[, week_T := max(date, na.rm = TRUE), by = .(iso_year, iso_week)]
-  
-  dt[, age_days := as.numeric(week_T - date)]
-  
-  dt[, decay_factor := lambda ^ age_days]
-  
-  # Kombiner markedsværdi og decay
-  dt[, me_decay := me * decay_factor]
-  
-  # --------------------------------------------------------------------------
-  # 3) Beregn porteføljevægte inden for hvert ben
-  # --------------------------------------------------------------------------
-  
-  dt[, w_alt := me_decay / sum(me_decay, na.rm = TRUE),
-     by = .(iso_year, iso_week, portfolio)]
-  
-  weight_check <- dt[, .(
-    w_sum = sum(w_alt, na.rm = TRUE)
-  ), by = .(iso_year, iso_week, portfolio)]
-  
-  if (any(abs(weight_check$w_sum - 1) > 1e-6, na.rm = TRUE)) {
-    warning("Nogle decay-vægte summerer ikke præcist til 1.")
-  }
-  
-  # --------------------------------------------------------------------------
-  # 4) Beregn low- og high-beta-ben
-  # --------------------------------------------------------------------------
-  
-  low_port <- dt[portfolio == "low", .(
-    r_low    = sum(w_alt * ret_exc_wk, na.rm = TRUE),
-    beta_low = sum(w_alt * beta_lag,   na.rm = TRUE),
-    n_low    = .N
-  ), by = .(iso_year, iso_week)]
-  
-  high_port <- dt[portfolio == "high", .(
-    r_high    = sum(w_alt * ret_exc_wk, na.rm = TRUE),
-    beta_high = sum(w_alt * beta_lag,   na.rm = TRUE),
-    n_high    = .N
-  ), by = .(iso_year, iso_week)]
-  
-  mkt_weekly <- dt[, .(
-    r_mkt = first(mkt_exc_wk),
-    date  = max(date)
-  ), by = .(iso_year, iso_week)]
-  
-  # --------------------------------------------------------------------------
-  # 5) Konstruér BAB
-  # --------------------------------------------------------------------------
-  
-  bab_alt <- merge(low_port, high_port, by = c("iso_year", "iso_week"))
-  bab_alt <- merge(bab_alt, mkt_weekly, by = c("iso_year", "iso_week"))
-  
-  setorder(bab_alt, iso_year, iso_week)
-  
-  bab_alt <- bab_alt[n_low >= min_stocks_leg & n_high >= min_stocks_leg]
-  
-  bab_alt[, r_bab := (1 / beta_low) * r_low - (1 / beta_high) * r_high]
-  
-  bab_alt <- bab_alt[
-    !is.na(r_bab) &
-      is.finite(r_bab) &
-      !is.na(r_mkt) &
-      is.finite(r_mkt)
-  ]
-  
-  # --------------------------------------------------------------------------
-  # 6) Performance-statistik
-  # --------------------------------------------------------------------------
-  
-  mod_int <- lm(r_bab ~ 1, data = bab_alt)
-  nw_int  <- coeftest(
-    mod_int,
-    vcov = NeweyWest(mod_int, lag = 4, prewhite = FALSE)
-  )
-  
-  mod_capm <- lm(r_bab ~ r_mkt, data = bab_alt)
-  nw_capm  <- coeftest(
-    mod_capm,
-    vcov = NeweyWest(mod_capm, lag = 4, prewhite = FALSE)
-  )
-  
-  mu    <- mean(bab_alt$r_bab, na.rm = TRUE)
-  sigma <- sd(bab_alt$r_bab, na.rm = TRUE)
-  
-  ann_ret    <- mu * 52
-  ann_vol    <- sigma * sqrt(52)
-  ann_sharpe <- ann_ret / ann_vol
-  
-  cum_ret  <- cumprod(1 + bab_alt$r_bab)
-  peak     <- cummax(cum_ret)
-  drawdown <- (cum_ret - peak) / peak
-  max_dd   <- min(drawdown, na.rm = TRUE)
-  
-  out <- data.table(
-    test              = label,
-    weighting         = "value-weighted decay",
-    lambda            = lambda,
-    n_weeks           = nrow(bab_alt),
-    start_date        = min(bab_alt$date),
-    end_date          = max(bab_alt$date),
-    
-    mean_weekly_pct   = mu * 100,
-    nw_t_mean         = nw_int[1, 3],
-    nw_p_mean         = nw_int[1, 4],
-    
-    ann_return_pct    = ann_ret * 100,
-    ann_vol_pct       = ann_vol * 100,
-    sharpe            = ann_sharpe,
-    max_drawdown_pct  = max_dd * 100,
-    
-    capm_alpha_w_pct  = nw_capm[1, 1] * 100,
-    capm_alpha_t      = nw_capm[1, 3],
-    capm_alpha_p      = nw_capm[1, 4],
-    capm_beta         = nw_capm[2, 1],
-    capm_r2           = summary(mod_capm)$r.squared,
-    
-    beta_low_avg      = mean(bab_alt$beta_low,  na.rm = TRUE),
-    beta_high_avg     = mean(bab_alt$beta_high, na.rm = TRUE),
-    n_low_avg         = mean(bab_alt$n_low,     na.rm = TRUE),
-    n_high_avg        = mean(bab_alt$n_high,    na.rm = TRUE),
-    
-    avg_age_days      = mean(dt$age_days, na.rm = TRUE),
-    max_age_days      = max(dt$age_days,  na.rm = TRUE)
-  )
-  
-  cat(sprintf("Ann. afkast      : %+.2f%%\n", out$ann_return_pct))
-  cat(sprintf("Sharpe ratio     : %.3f\n",   out$sharpe))
-  cat(sprintf("CAPM alfa, uge   : %+.4f%%, t = %.3f\n",
-              out$capm_alpha_w_pct, out$capm_alpha_t))
-  cat(sprintf("CAPM beta        : %.3f\n", out$capm_beta))
-  cat(sprintf("Max drawdown     : %+.2f%%\n", out$max_drawdown_pct))
-  cat(sprintf("Gns. observationsalder: %.2f dage\n", out$avg_age_days))
-  cat(sprintf("Maks. observationsalder: %.0f dage\n", out$max_age_days))
-  
-  return(list(
-    summary = out,
-    bab     = bab_alt,
-    data    = dt
-  ))
-}
-
-# ------------------------------------------------------------------------------
-# Kør robusthedstest med flere lambda-værdier
-# ------------------------------------------------------------------------------
-# lambda = 1.00 svarer til almindelig value-weighting uden decay.
-# lambda = 0.95 giver moderat decay.
-# lambda = 0.90 giver stærkere decay.
-# ------------------------------------------------------------------------------
-
-robust_decay_100 <- run_bab_decay_weight_test(
-  data_bab_input = data_bab,
-  lambda         = 1.00,
-  label          = "Value-weighted uden decay"
-)
-
-robust_decay_095 <- run_bab_decay_weight_test(
-  data_bab_input = data_bab,
-  lambda         = 0.8,
-  label          = "Value-weighted decay lambda 0.8"
-)
-
-robust_decay_090 <- run_bab_decay_weight_test(
-  data_bab_input = data_bab,
-  lambda         = 0.6,
-  label          = "Value-weighted decay lambda 0.60"
-)
-
-# ------------------------------------------------------------------------------
-# Baseline-statistik til sammenligning
-# ------------------------------------------------------------------------------
-
-cat("\n=== STEP 5.5: Sammenligning med baseline ===\n")
-
-baseline_mod_int <- lm(r_bab ~ 1, data = bab_clean)
-baseline_nw_int  <- coeftest(
-  baseline_mod_int,
-  vcov = NeweyWest(baseline_mod_int, lag = 4, prewhite = FALSE)
-)
-
-baseline_mod_capm <- lm(r_bab ~ r_mkt, data = bab_clean)
-baseline_nw_capm  <- coeftest(
-  baseline_mod_capm,
-  vcov = NeweyWest(baseline_mod_capm, lag = 4, prewhite = FALSE)
-)
-
-baseline_mu    <- mean(bab_clean$r_bab, na.rm = TRUE)
-baseline_sigma <- sd(bab_clean$r_bab, na.rm = TRUE)
-
-baseline_cum <- cumprod(1 + bab_clean$r_bab)
-baseline_dd  <- (baseline_cum - cummax(baseline_cum)) / cummax(baseline_cum)
-
-baseline_decay_summary <- data.table(
-  test              = "Baseline rank-weighted",
-  weighting         = "rank",
-  lambda            = NA_real_,
-  n_weeks           = nrow(bab_clean),
-  start_date        = min(bab_clean$date),
-  end_date          = max(bab_clean$date),
-  
-  mean_weekly_pct   = baseline_mu * 100,
-  nw_t_mean         = baseline_nw_int[1, 3],
-  nw_p_mean         = baseline_nw_int[1, 4],
-  
-  ann_return_pct    = baseline_mu * 52 * 100,
-  ann_vol_pct       = baseline_sigma * sqrt(52) * 100,
-  sharpe            = (baseline_mu / baseline_sigma) * sqrt(52),
-  max_drawdown_pct  = min(baseline_dd, na.rm = TRUE) * 100,
-  
-  capm_alpha_w_pct  = baseline_nw_capm[1, 1] * 100,
-  capm_alpha_t      = baseline_nw_capm[1, 3],
-  capm_alpha_p      = baseline_nw_capm[1, 4],
-  capm_beta         = baseline_nw_capm[2, 1],
-  capm_r2           = summary(baseline_mod_capm)$r.squared,
-  
-  beta_low_avg      = mean(bab_clean$beta_low,  na.rm = TRUE),
-  beta_high_avg     = mean(bab_clean$beta_high, na.rm = TRUE),
-  n_low_avg         = mean(bab_clean$n_low,     na.rm = TRUE),
-  n_high_avg        = mean(bab_clean$n_high,    na.rm = TRUE),
-  
-  avg_age_days      = NA_real_,
-  max_age_days      = NA_real_
-)
-
-robust_decay_summary <- rbindlist(list(
-  baseline_decay_summary,
-  robust_decay_100$summary,
-  robust_decay_095$summary,
-  robust_decay_090$summary
-), fill = TRUE)
-
-print(robust_decay_summary)
-
-# Gem tabel
-fwrite(robust_decay_summary, "robusthed_value_decay.csv")
-cat("\nGemt: robusthed_value_decay.csv\n")
-
-# Gem RDS-filer
-saveRDS(robust_decay_summary, "robusthed_value_decay_summary.rds")
-saveRDS(robust_decay_100$bab, "bab_robust_value_no_decay.rds")
-saveRDS(robust_decay_095$bab, "bab_robust_value_decay_095.rds")
-saveRDS(robust_decay_090$bab, "bab_robust_value_decay_090.rds")
-
-cat("Gemt:\n")
-cat("  -> robusthed_value_decay_summary.rds\n")
-cat("  -> bab_robust_value_no_decay.rds\n")
-cat("  -> bab_robust_value_decay_095.rds\n")
-cat("  -> bab_robust_value_decay_090.rds\n")
-
-# ------------------------------------------------------------------------------
-# Plot: kumuleret afkast
-# ------------------------------------------------------------------------------
-
-bab_base_plot <- copy(bab_clean[, .(date, r_bab)])
-bab_base_plot[, test := "Baseline rank-weighted"]
-
-bab_decay_100_plot <- copy(robust_decay_100$bab[, .(date, r_bab)])
-bab_decay_100_plot[, test := "Value-weighted uden decay"]
-
-bab_decay_095_plot <- copy(robust_decay_095$bab[, .(date, r_bab)])
-bab_decay_095_plot[, test := "Decay lambda 0.8"]
-
-bab_decay_090_plot <- copy(robust_decay_090$bab[, .(date, r_bab)])
-bab_decay_090_plot[, test := "Decay lambda 0.60"]
-
-decay_plot_data <- rbindlist(list(
-  bab_base_plot,
-  bab_decay_100_plot,
-  bab_decay_095_plot,
-  bab_decay_090_plot
-), fill = TRUE)
-
-setorder(decay_plot_data, test, date)
-
-decay_plot_data[, cum_return := cumprod(1 + r_bab) - 1, by = test]
-
-p_decay <- ggplot(
-  decay_plot_data,
-  aes(x = date, y = cum_return * 100, color = test, linetype = test)
-) +
-  geom_line(linewidth = 0.75) +
-  geom_hline(yintercept = 0, linetype = "dotted", color = "grey40") +
-  labs(
-    title    = "Robusthedstest: BAB-afkast med value-weighting og exponential decay",
-    subtitle = "Baseline sammenlignet med value-weighted porteføljer med forskellige decay-parametre",
-    x        = NULL,
-    y        = "Kumuleret afkast (%)",
-    color    = NULL,
-    linetype = NULL
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    legend.position = "bottom",
-    plot.title      = element_text(face = "bold"),
-    plot.subtitle   = element_text(color = "grey30")
-  )
-
-ggsave(
-  filename = "robusthed_value_decay_kumuleret_afkast.png",
-  plot     = p_decay,
-  width    = 12,
-  height   = 6,
-  dpi      = 300
-)
-
-cat("Gemt: robusthed_value_decay_kumuleret_afkast.png\n")
-
-# ------------------------------------------------------------------------------
-# Plot: Sharpe-ratio
-# ------------------------------------------------------------------------------
-
-p_decay_bar <- ggplot(
-  robust_decay_summary,
-  aes(x = test, y = sharpe)
-) +
-  geom_col(width = 0.60, fill = "steelblue") +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
-  labs(
-    title    = "Robusthedstest: Sharpe-ratio med value-weighting og decay",
-    subtitle = "Annualiseret Sharpe-ratio for BAB-strategien",
-    x        = NULL,
-    y        = "Sharpe-ratio"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    plot.title    = element_text(face = "bold"),
-    plot.subtitle = element_text(color = "grey30"),
-    axis.text.x   = element_text(angle = 15, hjust = 1)
-  )
-
-ggsave(
-  filename = "robusthed_value_decay_sharpe.png",
-  plot     = p_decay_bar,
-  width    = 10,
-  height   = 5,
-  dpi      = 300
-)
-
-cat("Gemt: robusthed_value_decay_sharpe.png\n")
-
-cat("\n=== STEP 5.5 FÆRDIG — robusthedstest for value-weighted decay er gennemført ===\n")
-
-
-
-# ==============================================================================
 # SAMLET OVERSIGT: SHARPE-RATIOER FRA ALLE ROBUSTHEDSTEST
 # ==============================================================================
 
@@ -2525,8 +2089,7 @@ cat("\nGemt: samlet_sharpe_robusthedstest.csv\n")
 #        r_BAB,net,t = r_BAB,t - transaction_cost_t
 #        transaction_cost_t = cost_bps / 10000 * gross_turnover_t
 #
-#   4. Aggregér ugentlige nettoafkast til månedlige afkast, så resultaterne
-#      kan sammenlignes direkte med hovedtabellen.
+#   4. Aggregerer ugentlige nettoafkast til månedlige afkast.
 #
 # Output:
 #   - handelsomkostninger_turnover_weekly.csv
@@ -2535,6 +2098,7 @@ cat("\nGemt: samlet_sharpe_robusthedstest.csv\n")
 #   - handelsomkostninger_break_even.csv
 #   - handelsomkostninger_nettoafkast.png
 #   - handelsomkostninger_sharpe.png
+#   - handelsomkostninger_return_alpha.png
 # ==============================================================================
 
 cat("\n=== STEP 6: Empirisk test af handelsomkostninger ===\n")
@@ -2601,9 +2165,8 @@ if (length(missing_bab) > 0) {
   )
 }
 
-# Arbejd på kopier
-dt_bab  <- copy(data_bab)
-bab_tc  <- copy(bab_clean)
+dt_bab <- copy(data_bab)
+bab_tc <- copy(bab_clean)
 
 # ------------------------------------------------------------------------------
 # 1) Konstruér ugentlig tidsindeks
@@ -2631,7 +2194,6 @@ setorder(bab_tc, week_id)
 # 2) Rekonstruér signed BAB-vægte på aktieniveau
 # ------------------------------------------------------------------------------
 
-# Merge porteføljebetaer ind på aktieniveau
 weights_bab <- merge(
   dt_bab[
     !is.na(w) &
@@ -2669,7 +2231,6 @@ weights_bab <- weights_bab[
     abs(beta_high) > 1e-6
 ]
 
-# Signed, beta-skalerede vægte
 weights_bab[, signed_weight := fifelse(
   portfolio == "low",
   w / beta_low,
@@ -2717,29 +2278,24 @@ cat(sprintf(
   mean(recon_check$net_exposure, na.rm = TRUE)
 ))
 
-# Gem validering
 fwrite(recon_check, "handelsomkostninger_reconstruction_check.csv")
 
 # ------------------------------------------------------------------------------
 # 4) Beregn ugentlig turnover
 # ------------------------------------------------------------------------------
 
-# Aktuelle vægte
 current_w <- weights_bab[, .(
   id,
   week_id,
   signed_weight
 )]
 
-# Forrige uges vægte flyttes én uge frem, så de kan sammenlignes med aktuelle vægte
 previous_w <- current_w[, .(
   id,
   week_id = week_id + 1L,
   signed_weight_lag = signed_weight
 )]
 
-# Full outer merge sikrer, at både nye aktier og aktier, der forlader porteføljen,
-# indgår i turnover.
 turnover_long <- merge(
   current_w,
   previous_w,
@@ -2747,7 +2303,6 @@ turnover_long <- merge(
   all = TRUE
 )
 
-# Behold kun faktiske BAB-uger
 turnover_long <- turnover_long[
   week_id %in% weeks$week_id
 ]
@@ -2772,8 +2327,6 @@ turnover_weekly <- merge(
 
 setorder(turnover_weekly, week_id)
 
-# Første uge er initial portfolio formation. Den kan rapporteres, men ekskluderes
-# fra gennemsnitlig løbende turnover.
 turnover_weekly[, is_initial_week := week_id == min(week_id, na.rm = TRUE)]
 
 turnover_summary <- turnover_weekly[is_initial_week == FALSE, .(
@@ -2800,13 +2353,6 @@ cat("  -> handelsomkostninger_turnover_summary.csv\n")
 # 5) Break-even handelsomkostning
 # ------------------------------------------------------------------------------
 
-# Break-even beregnes som den handelsomkostning i bps, der reducerer det
-# gennemsnitlige ugentlige BAB-afkast til nul:
-#
-# mean(r_BAB - c * gross_turnover) = 0
-# c = mean(r_BAB) / mean(gross_turnover)
-# bps = c * 10000
-
 bab_turnover <- merge(
   bab_tc[, .(
     week_id,
@@ -2830,19 +2376,15 @@ bab_turnover <- merge(
 
 setDT(bab_turnover)
 
-# Sikkerhed: sørg for at is_initial_week er logisk og uden NA
 bab_turnover[, is_initial_week := as.logical(is_initial_week)]
 bab_turnover[is.na(is_initial_week), is_initial_week := FALSE]
 
-# Initial porteføljeopbygning sættes til 0 i omkostningsberegningen,
-# så første uges etablering ikke dominerer analysen
 bab_turnover[, gross_turnover_for_cost := fifelse(
   is_initial_week == TRUE,
   0,
   gross_turnover
 )]
 
-# Break-even beregnes ekskl. initial uge
 break_even_bps <- bab_turnover[
   is_initial_week == FALSE &
     !is.na(r_bab) &
@@ -2882,7 +2424,6 @@ calc_tc_performance <- function(dt, cost_bps) {
   
   dt <- copy(dt)
   
-  # Nettoafkast efter handelsomkostninger
   dt[, r_bab_net := r_bab - (cost_bps / 10000) * gross_turnover_for_cost]
   
   dt <- dt[
@@ -2892,7 +2433,6 @@ calc_tc_performance <- function(dt, cost_bps) {
       is.finite(r_mkt)
   ]
   
-  # Aggreger til månedlige afkast, så tallene matcher hovedtabellen
   dt[, `:=`(
     yr  = as.integer(format(date, "%Y")),
     mth = as.integer(format(date, "%m"))
@@ -2913,7 +2453,6 @@ calc_tc_performance <- function(dt, cost_bps) {
       is.finite(r_mkt_m)
   ]
   
-  # Mean return-test
   mod_int <- lm(r_bab_net_m ~ 1, data = dt_mth)
   
   nw_int <- coeftest(
@@ -2921,7 +2460,6 @@ calc_tc_performance <- function(dt, cost_bps) {
     vcov = NeweyWest(mod_int, lag = 3, prewhite = FALSE)
   )
   
-  # CAPM-alpha
   mod_capm <- lm(r_bab_net_m ~ r_mkt_m, data = dt_mth)
   
   nw_capm <- coeftest(
@@ -2937,6 +2475,15 @@ calc_tc_performance <- function(dt, cost_bps) {
   ann_ret    <- mu * 12
   ann_vol    <- sigma * sqrt(12)
   ann_sharpe <- ann_ret / ann_vol
+  
+  capm_alpha_m   <- as.numeric(nw_capm[1, 1])
+  capm_alpha_ann <- capm_alpha_m * 12
+  
+  capm_alpha_ann_compounded <- ifelse(
+    1 + capm_alpha_m > 0,
+    (1 + capm_alpha_m)^12 - 1,
+    NA_real_
+  )
   
   cum_ret  <- cumprod(1 + r)
   peak     <- cummax(cum_ret)
@@ -2958,7 +2505,10 @@ calc_tc_performance <- function(dt, cost_bps) {
     sharpe         = ann_sharpe,
     max_drawdown_pct = max_dd * 100,
     
-    capm_alpha_m_pct = nw_capm[1, 1] * 100,
+    capm_alpha_m_pct = capm_alpha_m * 100,
+    capm_alpha_ann_pct = capm_alpha_ann * 100,
+    capm_alpha_ann_compounded_pct = capm_alpha_ann_compounded * 100,
+    
     capm_alpha_t     = nw_capm[1, 3],
     capm_alpha_p     = nw_capm[1, 4],
     capm_beta        = nw_capm[2, 1],
@@ -2973,9 +2523,6 @@ calc_tc_performance <- function(dt, cost_bps) {
 # 7) Kør handelsomkostningsscenarier
 # ------------------------------------------------------------------------------
 
-# cost_bps er én-vejs handelsomkostning pr. handlet værdi.
-# Eksempel:
-#   10 bps betyder 0,10% af den handlede porteføljeværdi.
 cost_levels_bps <- c(0, 5, 10, 25, 50, 75, 100)
 
 tc_performance <- rbindlist(lapply(
@@ -3117,24 +2664,47 @@ ggsave(
 cat("Gemt: handelsomkostninger_sharpe.png\n")
 
 # ------------------------------------------------------------------------------
-# 11) Plot: Annualiseret nettoafkast og CAPM-alpha
+# 11) Plot: Annualiseret nettoafkast og annualiseret CAPM-alpha
 # ------------------------------------------------------------------------------
 
+if (!"capm_alpha_ann_pct" %in% names(tc_performance)) {
+  tc_performance[, capm_alpha_ann_pct := capm_alpha_m_pct * 12]
+}
+
 tc_plot_long <- melt(
-  tc_performance[, .(
-    cost_bps,
-    ann_return_pct,
-    capm_alpha_m_pct
-  )],
+  tc_performance,
   id.vars = "cost_bps",
+  measure.vars = c("ann_return_pct", "capm_alpha_ann_pct"),
   variable.name = "metric",
-  value.name = "value"
+  value.name = "value",
+  variable.factor = FALSE
 )
 
-tc_plot_long[, metric := fcase(
-  metric == "ann_return_pct",  "Annualiseret nettoafkast",
-  metric == "capm_alpha_m_pct", "CAPM-alpha, månedlig"
+tc_plot_long[, metric := as.character(metric)]
+
+tc_plot_long[, metric := fifelse(
+  metric == "ann_return_pct",
+  "Annualiseret nettoafkast",
+  fifelse(
+    metric == "capm_alpha_ann_pct",
+    "Annualiseret CAPM-alpha",
+    NA_character_
+  )
 )]
+
+tc_plot_long <- tc_plot_long[
+  !is.na(metric) &
+    !is.na(value) &
+    is.finite(value)
+]
+
+tc_plot_long[, metric := factor(
+  metric,
+  levels = c("Annualiseret nettoafkast", "Annualiseret CAPM-alpha")
+)]
+
+cat("\nKontrol af plotdata til Figur 7:\n")
+print(tc_plot_long[, .N, by = metric])
 
 p_tc_return_alpha <- ggplot(
   tc_plot_long,
@@ -3155,9 +2725,9 @@ p_tc_return_alpha <- ggplot(
   ) +
   labs(
     title = "Afkast og CAPM-alpha efter handelsomkostninger",
-    subtitle = "Nettoafkast beregnes efter ugentlig turnover og én-vejs handelsomkostninger",
+    subtitle = "Begge mål er annualiserede og beregnet på månedlige nettoafkast",
     x = "Én-vejs handelsomkostning, bps",
-    y = "Procent",
+    y = "Procent p.a.",
     fill = NULL
   ) +
   theme_minimal(base_size = 12) +
@@ -3188,24 +2758,27 @@ cost_50  <- tc_performance[cost_bps == 50]
 cat("\n=== Automatisk opsummering: handelsomkostninger ===\n")
 
 cat(sprintf(
-  "Baseline uden handelsomkostninger: Sharpe = %.3f, ann. afkast = %.2f%%.\n",
+  "Baseline uden handelsomkostninger: Sharpe = %.3f, ann. afkast = %.2f%%, ann. CAPM-alpha = %.2f%%.\n",
   base_row$sharpe,
-  base_row$ann_return_pct
+  base_row$ann_return_pct,
+  base_row$capm_alpha_ann_pct
 ))
 
 if (nrow(cost_25) == 1) {
   cat(sprintf(
-    "Ved 25 bps handelsomkostning: Sharpe = %.3f, ann. afkast = %.2f%%.\n",
+    "Ved 25 bps handelsomkostning: Sharpe = %.3f, ann. afkast = %.2f%%, ann. CAPM-alpha = %.2f%%.\n",
     cost_25$sharpe,
-    cost_25$ann_return_pct
+    cost_25$ann_return_pct,
+    cost_25$capm_alpha_ann_pct
   ))
 }
 
 if (nrow(cost_50) == 1) {
   cat(sprintf(
-    "Ved 50 bps handelsomkostning: Sharpe = %.3f, ann. afkast = %.2f%%.\n",
+    "Ved 50 bps handelsomkostning: Sharpe = %.3f, ann. afkast = %.2f%%, ann. CAPM-alpha = %.2f%%.\n",
     cost_50$sharpe,
-    cost_50$ann_return_pct
+    cost_50$ann_return_pct,
+    cost_50$capm_alpha_ann_pct
   ))
 }
 
@@ -3214,7 +2787,7 @@ cat(sprintf(
   break_even_bps$break_even_bps_mean_return
 ))
 
-cat("\n=== STEP 7 FÆRDIG — handelsomkostninger testet empirisk ===\n")
+cat("\n=== STEP 6 FÆRDIG — handelsomkostninger testet empirisk ===\n")
 
 
 # ==============================================================================
@@ -3558,7 +3131,7 @@ cat(sprintf(
 cat("\n=== STEP 7.X FÆRDIG — leverage-statistik beregnet ===\n")
 
 # ==============================================================================
-# STEP 7.X: LIKVIDITETS- OG IMPLEMENTERBARHEDSTEST
+# STEP 7.1: LIKVIDITETS- OG IMPLEMENTERBARHEDSTEST
 # ==============================================================================
 # Formål:
 #   Tester om BAB-strategien kan implementeres i et mere likvidt large-cap-univers.
@@ -3589,7 +3162,7 @@ cat("\n=== STEP 7.X FÆRDIG — leverage-statistik beregnet ===\n")
 #   - bab_liquidity_top250.rds
 # ==============================================================================
 
-cat("\n=== STEP 7.X: Likviditets- og implementerbarhedstest ===\n")
+cat("\n=== STEP 7.1: Likviditets- og implementerbarhedstest ===\n")
 
 library(data.table)
 library(ggplot2)

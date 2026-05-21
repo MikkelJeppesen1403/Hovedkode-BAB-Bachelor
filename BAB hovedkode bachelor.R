@@ -438,10 +438,10 @@ if (!USE_CACHE) {
 #   β_i = ρ_{i,m} × (σ_i / σ_m)
 #
 #   ρ : rolling korrelation fra ugentlige afkast
-#       vindue = 52 uger (1 år), minimum 26 uger
+#       vindue = 260 uger (5 år), minimum 52 uger
 #
 #   σ : rolling volatilitet fra ugentlige afkast
-#       vindue = 260 uger (5 år), minimum 156 uger (3 år)
+#       vindue = 52 uger (1 år), minimum 26 uger 
 #
 # Shrinkage mod 1 (F&P):
 #   β̂_i = 0.6 × β_raw + 0.4
